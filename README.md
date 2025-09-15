@@ -75,11 +75,11 @@ We employ SWE-Builder, an LLM-based multi-agent system consisting of:
 
 We evaluated SWE-Builder using three base models:
 
-| Base Model                | Valid Rate (%) | Success Rate (%) | Cost (USD) | Time (min) |
+| Base Model                | F2P Rate (%) | Output Rate (%) | Cost (USD) | Time (min) |
 |---------------------------|----------------|------------------|------------|------------|
-| GPT-4.1-mini              | 40.1 (269/671) | 57.2 (384/671)   | 0.045      | 22.4       |
-| DeepSeek-v3-0324          | 34.6 (232/671) | 50.8 (341/671)   | 0.043      | 22.5       |
-| Gemini-2.5-flash-preview  | 33.5 (225/671) | 49.8 (334/671)   | 0.024      | 27.0       |
+| GPT-4.1-mini              | 50.2 (337/671) | 64.8 (435/671)   | 0.047      | 26.3       |
+| DeepSeek-v3-0324          | 42.0 (282/671) | 53.4 (358/671)   | 0.037      | 23.0       |
+| Kimi-K2  | 47.8 (321/671) | 63.2 (424/671)   | 0.056      | 30.2       |
 
 To reproduce these experiments:
 
