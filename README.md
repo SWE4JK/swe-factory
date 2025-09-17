@@ -2,17 +2,9 @@
 
 Your automated factory for GitHub Issue Resolution Training Data and Evaluation Benchmarks.
 
-[![SVG Banners](https://svg-banners.vercel.app/api?type=origin&text1=SWE-Factory%20🧑‍💻&text2=✨%20Build%20Your%20Own%20SWE-Bench%20and%20SWE-Gym,%20Automatically!&width=900&height=200)](https://github.com/Akshay090/svg-banners)
-
-<!-- paper . data and models . project page -->
-<p align="center">
-<a href="https://arxiv.org/abs/2506.10954">📃 Paper</a>
-•
-<a href="https://huggingface.co/SWE-Factory">🤗 Data & Models</a>
-</p>
+[![SVG Banners](https://svg-banners.vercel.app/api?type=origin&text1=SWE-Factory%20🧑‍💻&text2=✨%20Build%20Your%20GitHub%20Issue%20Resolution%20Dataset%2C%20Right%20Now!&width=900&height=200)](https://github.com/Akshay090/svg-banners)
 
 ## 📰 News
-* **[Sep. 17, 2025]**: *Build your own SWE-GYM with SWE-Factory!* We trained a series of LLMs on 2,809 Python task instances constructed with our framework, all demonstrating effective performance improvements. For instance, the resolve rate of the fine-tuned Qwen2.5-Coder-14B-instruct model increased from 5.8% to 21.0%. The training trajectories sampled from our 2,809 task instances and fine-tuned models are open-sourced on <a href="https://huggingface.co/SWE-Factory">🤗 Huggingface</a>.
 * **[Sep. 15, 2025]**: We release SWE-Factory 1.5, which is more robust and has a higher success rate.
 
 
@@ -133,5 +125,5 @@ If SWE-Factory helps your research or projects, star ⭐ our repo or cite us:
 
 ## 🙏 Acknowledgements
 
-- We build upon prior research — **[R2E-Gym](https://github.com/R2E-Gym/R2E-Gym/)**, **[SWE-bench](https://arxiv.org/abs/2310.06770)**, **[AutoCodeRover](https://arxiv.org/abs/2404.05427)**, **[Magis](https://arxiv.org/abs/2403.17927)**, and **[OmniGIRL](https://arxiv.org/abs/2505.04606)** — foundational to our work.
-- Huge thanks to the open-source developer community for your invaluable contributions to software engineering research. ❤️
+- We build upon prior research — **[SWE-bench](https://arxiv.org/abs/2310.06770)**, **[AutoCodeRover](https://arxiv.org/abs/2404.05427)**, **[Magis](https://arxiv.org/abs/2403.17927)**, and **[OmniGIRL](https://arxiv.org/abs/2505.04606)** — foundational to our work.
+- Huge thanks to the **open-source developer community**; your invaluable contributions underpin software engineering research! ❤️
