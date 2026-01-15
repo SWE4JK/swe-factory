@@ -62,9 +62,10 @@ Outputs in `--output`:
 
 Run against the transferred dataset produced in Stage 1. We currently support
 mini_swe_agent, the DeepSWE editing agent (r2egym scaffold), and OpenHands (last).
-The OpenHands implementation diverges from the official project; we aim for a
-close reproduction and welcome PRs. At the moment, only non-function calling
-mode is supported.
+OpenHands is unofficial here and diverges significantly from the original
+implementation, so please use it with caution. We aim for a closer reproduction
+over time and welcome PRs. At the moment, only non-function calling mode is
+supported.
 
 The dataset should be the Stage 1 transferred output (for example,
 `/path/to/run_dir/<input_stem>_transferred.json`). Each entry should include:
