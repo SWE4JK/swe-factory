@@ -1,0 +1,29 @@
+Review the finalized Dockerfile and decide whether the evaluation script (`run_tests.sh`) must be updated. You are given a skeleton script that contains a placeholder `[CONTENT_OF_TEST_PATCH]`; do not modify or remove that placeholder. We will restore the actual patch content later to prevent accidental edits.
+
+**Context**
+- Final Dockerfile (after self-check):
+```dockerfile
+{{FINAL_DOCKERFILE}}
+```
+- Unified diff versus the original Dockerfile:
+```diff
+{{DOCKER_DIFF}}
+```
+- Evaluation script skeleton (patch content replaced by `[CONTENT_OF_TEST_PATCH]`):
+```bash
+{{ORIGINAL_EVAL_SCRIPT}}
+```
+
+**Instructions**
+1. Preserve the existing validation flow; only modify the script if Dockerfile changes (paths, user, environment activation, etc.) truly require it. Keep `[CONTENT_OF_TEST_PATCH]` exactly in place; do not rewrite or expand the patch content.
+2. Ensure the script activates or exports the same environment used during build (e.g., source the Python venv) so `python`/`pytest` resolve correctly.
+3. Do not introduce network access or installation commands, and keep the `OMNIGRIL_EXIT_CODE` behavior unchanged.
+4. If an update is required, return the full script **with `[CONTENT_OF_TEST_PATCH]` still present**. If no change is needed, return `<None>`.
+
+**Output format (strict JSON):**
+```json
+{
+  "eval_script": "<full script or <None>>",
+  "notes": "Brief explanation of the decision; if unchanged, justify why"
+}
+```

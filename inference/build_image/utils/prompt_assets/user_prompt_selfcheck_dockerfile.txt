@@ -1,0 +1,35 @@
+You previously drafted a candidate Dockerfile for the agent environment. Review it against the checklist and diff below, and decide whether further edits are required.
+
+**Checklist (must all pass)**
+{{CHECKLIST}}
+
+**Original Dockerfile**
+```dockerfile
+{{ORIGINAL_DOCKERFILE}}
+```
+
+**Current candidate**
+```dockerfile
+{{CANDIDATE_DOCKERFILE}}
+```
+
+**Unified diff (candidate vs. original)**
+```diff
+{{DOCKER_DIFF}}
+```
+
+Instructions:
+- Re-check every checklist item against the candidate Dockerfile. Focus on repository location, environment availability (`bash -lc` should work via `/root/.profile`; ENV PATH is optional if profile activation suffices), baseline fidelity, and keeping /testbed clean (exclude only paths inside the repo; never exclude /opt or other external paths).
+- Treat `/root/.profile` activation as sufficient; `.bashrc` is optional. If the environment is under `/opt`, adding excludes is unnecessary and should not be flagged as a failure. Do not suggest new post-clone steps that were not in the original.
+- Git hygiene rule (be permissive): do **not** mark a revision needed just because the Dockerfile writes `/testbed/.git/info/exclude`, even if it includes lockfiles (e.g., `pdm.lock`). Treat lockfile/cache excludes under `/testbed` as normal and acceptable for keeping the patch snapshot clean.
+- Only flag a Git hygiene failure if the Dockerfile excludes paths outside `/testbed` (especially anything under `/opt`), or if it excludes the entire repo broadly (e.g., `*`, `/`, or `/testbed`).
+- Report **only** the checklist entries that fail or are at risk. Skip items that already pass.
+- For each failing item, write a single sentence in the format: `"<index>❌ <short title> – Issue: … Impact: … Fix: …"`.
+- `needs_revision` must be `false` only when every checklist item passes (no feedback lines). In that case, set `feedback` to a short confirmation such as `"All checklist items satisfied; no changes needed."`
+- Output strict JSON only:
+```json
+{
+  "needs_revision": true,
+  "feedback": "2❌ …"
+}
+```

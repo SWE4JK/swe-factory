@@ -1,0 +1,58 @@
+You are adapting an already-working validation Dockerfile so the coding agent can drive it. Runtime is root by default; no non-root workarounds. Change as little as possible: keep the repo directly at `/testbed` (not nested), keep the baseline toolchain usable, and ensure `/opt/run_tests.sh` runs end-to-end. Motivation: the agent will patch code inside `/testbed` and we need clean git diffs, so only nudge placement/activation; avoid reshuffling the baseline. Think “tidy an existing bench” — add only the smallest shims.
+
+Return only the modified Dockerfile; `eval_script` must stay as the literal `<None>`.
+
+---
+**How to adapt without rewriting the baseline**
+
+- **Repository**: Ensure the repo ends up at `/testbed` (no nesting) and keep `WORKDIR /testbed`. Preserve the existing clone/fetch/checkout/submodule/chmod commands exactly as written, still running under `/testbed`.
+
+- **Keep install blocks verbatim**: Existing `apt-get install`, `pip install`, `poetry install`, `pdm install`, `conda` commands stay untouched. If you need extra deps, add a new `RUN`.
+
+- **Shared environment**: Whatever the baseline uses (Poetry/pdm/venv/conda), keep its location and name (/opt or /testbed) and avoid duplicates. Ensure runtime matches build-time: append `ENV PATH="...:$PATH"` and an activation/PATH snippet to `/root/.profile` (e.g., `source /testbed/venv/bin/activate` or the matching conda/Poetry/pdm command) so `bash -lc` picks up the intended environment. If the env lives under `/testbed`, you may add it to `.git/info/exclude`; if it lives under `/opt`, do not add excludes. Do not create an extra env in /opt and /testbed at the same time.
+
+- **Minimal text handling**: If you must fix line endings, touch only tracked files (skip `.git`). Keep `git apply` usage identical; do not pipe it or edit `.git`.
+
+- **Baseline fidelity**: Avoid changing the base image, Python version, or key ENV/ARG unless absolutely required. Revert any temporary tweaks you make while reasoning.
+- **Leave run script intact**: `/opt/run_tests.sh` (or equivalent) is part of the baseline; do not inline-rewrite it in the Dockerfile—just keep it present and executable.
+- **Keep git diff clean**: It is normal and acceptable to exclude build artefacts under `/testbed` (env/cache and lockfiles generated during build like `pdm.lock`) in `/testbed/.git/info/exclude`; if env is in `/opt`, do not add excludes.
+
+  Simple pattern (append; list exact paths):
+  ```dockerfile
+  RUN cd /testbed && mkdir -p .git/info && \
+      printf ".pdm-python\npdm.lock\n__pycache__/\n.pytest_cache/\n" >> .git/info/exclude
+  ```
+
+---
+**What must hold when tests run**
+1. Repo is at `/testbed`, with the original git follow-up commands still running.
+2. Runtime user is root; PATH/activation exposes the intended toolchain to `bash -lc`.
+3. The shared environment (Poetry/pdm/venv/conda) is reused as-is—no extra per-user venvs.
+4. Startup is ready: `bash -lc` can immediately run `python`, `pytest`, or the repo’s CLI because PATH/activation is set.
+5. Only add to `.git/info/exclude` when env/cache lives under `/testbed`; never exclude paths outside the repo.
+6. `eval_script` output remains `<None>` for this phase.
+
+---
+**Pre-submit reminders**
+- Repo ends up at `/testbed`; clone/checkout/submodule/chmod are unchanged.
+- All original install commands stay verbatim; new deps go in extra RUN steps.
+- Configure mirrors/indexes if needed for flaky networks.
+- Confirm shared environment: runtime and build use the same binaries (avoid stray `/testbed/.venv` etc.).
+- PATH/activation is written into `/root/.profile` (`.bashrc` optional) so `bash -l` works immediately.
+- `/opt/run_tests.sh` remains present/executable; do not rewrite it inline.
+- Use `printf`/heredoc for multi-line writes; skip `.git` when fixing line endings.
+
+---
+**Output format (strict JSON; no extra text):**
+```json
+{
+  "dockerfile": "string (full modified Dockerfile or <None>)",
+  "eval_script": "<None>",
+  "notes": "string (brief explanation of what changed and why)"
+}
+```
+
+**Original Dockerfile**
+```dockerfile
+{{ORIGINAL_DOCKERFILE}}
+```
