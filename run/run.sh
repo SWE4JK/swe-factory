@@ -33,7 +33,7 @@ for idx in $(seq 17 $BATCH_COUNT); do
     continue
   fi
 
-  cleanup
+  # cleanup
 
   OUT_DIR="output_test1/${REPO_NAME}/${MODEL}/round_${ROUND}_batch_${idx}"
   RESULT_DIR="output_test1/${REPO_NAME}/${MODEL}/results"
