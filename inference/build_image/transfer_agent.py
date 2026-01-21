@@ -69,8 +69,8 @@ class TransferAgent:
         task_dict: Dict[str, Any],
         max_iteration_num: int,
         output_path: str,
-        eval_timeout: int = 300,
         model_name: str,
+        eval_timeout: int = 300,
     ) -> None:
         self.task_dict = task_dict
         self.max_iteration_num = max_iteration_num
