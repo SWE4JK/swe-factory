@@ -1,10 +1,12 @@
 # Inference
 
-This folder is a two-stage workflow:
-1) Build or transfer Docker images locally (produce a dataset with `docker_image`).
-2) Run the editing agents against those images.
+Two-stage pipeline for running editing agents on SWE environments:
 
-## Environment Setup
+```
+Stage 1: build/transfer images  ->  Stage 2: run agents
+```
+
+## Setup
 
 ```bash
 conda create -n inference python=3.13 -y
@@ -31,14 +33,10 @@ then embed artifacts (Dockerfile + eval script) into a new dataset file. Use the
 dataset produced by the SWE-Builder stage (the output of `app/main.py` under the
 `results` directory) as-is.
 
-Input is simply the SWE-Builder output dataset (use it as-is).
-
 ### LLM Configuration (Stage 1)
 
-Before running, **set the Stage 1 env vars below**.
-
-Stage 1 uses direct OpenAI-compatible chat completions (not LiteLLM). Configure
-the LLM before running:
+> [!IMPORTANT]
+> Stage 1 uses direct OpenAI-compatible chat completions (not LiteLLM).
 
 ```bash
 export OPENAI_API_KEY="YOUR_API_KEY"
@@ -88,18 +86,16 @@ Outputs in `--output`:
 
 ### Supported Agents
 
-Run against the transferred dataset produced in Stage 1. We currently support
-mini_swe_agent, the DeepSWE editing agent (r2egym scaffold), live_swe_agent, and
-OpenHands (experimental, unofficial). OpenHands diverges significantly from the
-original implementation, so please use it with caution. We aim for a closer
-reproduction over time and welcome PRs. At the moment, only non-function calling
-mode is supported.
+Run against the transferred dataset produced in Stage 1.
 
-Notes:
-- mini_swe_agent and live_swe_agent only expose a bash tool, so they are
-  language-agnostic and suitable for non-Python repos.
-- r2egym (DeepSWE) and OpenHands use Python-based tools; we recommend them for
-  Python repositories.
+| Agent | Scaffold | Tools | Recommended Use |
+| --- | --- | --- | --- |
+| mini_swe_agent | `mini_swe_agent` | bash-only | multi-language / non-Python repos |
+| live_swe_agent | `live_swe_agent` | bash-only | multi-language / non-Python repos |
+| DeepSWE (r2egym) | `r2egym` | Python tools | Python repos |
+| OpenHands (experimental, unofficial) | `openhands` | Python tools | Python repos |
+
+OpenHands diverges significantly from the original implementation, so please use it with caution.
 
 ### Dataset Requirements
 
@@ -109,7 +105,6 @@ The dataset should be the Stage 1 transferred output (for example,
 
 Model calls go through LiteLLM. Set your base URL and provider API key before
 running (examples below).
-If you skipped the quickstart section above, set the Stage 2 env vars now.
 
 ### LLM Configuration (Stage 2)
 
@@ -121,8 +116,9 @@ export OPENROUTER_API_KEY="YOUR_OPENROUTER_KEY"
 
 ### Examples
 
-**Run these commands from the repo root.** If you run from another directory,
-set `PYTHONPATH` to the repo path first.
+> [!NOTE]
+> Run these commands from the repo root. If you run from another directory,
+> set `PYTHONPATH` to the repo path first.
 
 mini_swe_agent:
 ```bash
@@ -195,6 +191,25 @@ Notes:
 - `--backend` currently supports `docker` only.
 - If you use a non-OpenAI provider, set the matching API key env var (for example, `ANTHROPIC_API_KEY`).
 - This codebase is built on top of R2E-Gym; thanks to the original authors.
+
+### Run Outputs (Stage 2)
+
+Each run writes artifacts to `--traj_dir`. For example:
+`/home/azureuser/glh/new_version/swe-factory/run_logs/batch001-004-mini-kimi-2`
+
+Directory layout:
+```
+run_logs/<exp_name>/
+  <exp_name>.jsonl
+  trajectories.jsonl
+  trajectories_rejection_sampling.jsonl
+  reward_summary.json
+  <instance_id>/
+    agent.log
+    output_patch.diff
+    test_output.log
+    metadata.json
+```
 
 ### Parameters (Stage 2)
 
