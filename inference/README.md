@@ -195,7 +195,7 @@ Notes:
 ### Run Outputs (Stage 2)
 
 Each run writes artifacts to `--traj_dir`. For example:
-`/home/azureuser/glh/new_version/swe-factory/run_logs/batch001-004-mini-kimi-2`
+`./run_logs/my_run`
 
 Directory layout:
 ```
