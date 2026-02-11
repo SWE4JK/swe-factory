@@ -1,17 +1,21 @@
+import hashlib
 import logging
+import os
+import random
 import re
 import requests
+import string
 import time
 
 from bs4 import BeautifulSoup
 from ghapi.core import GhApi
 from fastcore.net import HTTP404NotFoundError, HTTP403ForbiddenError
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Optional
 from tqdm import tqdm
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-import requests
 import csv
 from io import StringIO
 from datetime import datetime
@@ -19,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 from pygments.lexers import get_lexer_for_filename
 from pygments.util import ClassNotFound
-import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -43,6 +46,102 @@ def get_language_with_pygments(filename):
         return "Unknown"
 
 
+class ProxyRotator:
+    """
+    Manages proxy rotation based on request count.
+
+    GitHub anonymous rate limit: 60 requests/hour per IP.
+    Strategy: Rotate to a new Session ID (new IP) every N requests.
+
+    Required environment variables:
+        VORTEX_PROXY_HOST          - Proxy host address
+        VORTEX_PROXY_PASSWORD      - Proxy password
+        VORTEX_PROXY_HTTP_PORT     - HTTP port (default: 8080)
+        VORTEX_PROXY_HTTPS_PORT    - HTTPS port (default: 18080)
+        VORTEX_PROXY_COUNTRY       - Country code (default: us)
+        VORTEX_PROXY_USE_SESSION   - Use session-based sticky IP (default: true)
+        VORTEX_PROXY_MAX_REQUESTS_PER_IP - Max requests before rotating (default: 50)
+    """
+
+    def __init__(self, repo_full_name: str):
+        self.repo_full_name = repo_full_name
+        self.request_count = 0
+        self.max_requests_per_ip = int(os.getenv("VORTEX_PROXY_MAX_REQUESTS_PER_IP", "50"))
+        self.current_session_id = None
+        self.rotation_count = 0
+
+        self.host = os.getenv("VORTEX_PROXY_HOST")
+        self.password = os.getenv("VORTEX_PROXY_PASSWORD")
+        self.http_port = os.getenv("VORTEX_PROXY_HTTP_PORT", "8080")
+        self.https_port = os.getenv("VORTEX_PROXY_HTTPS_PORT", "18080")
+        self.country = os.getenv("VORTEX_PROXY_COUNTRY", "us")
+        self.use_session = os.getenv("VORTEX_PROXY_USE_SESSION", "true").lower() == "true"
+
+        self.enabled = bool(self.host and self.password)
+
+        if self.enabled:
+            logger.info(
+                f"[{self.repo_full_name}] Proxy rotator initialized: "
+                f"max_requests_per_ip={self.max_requests_per_ip}, "
+                f"use_session={self.use_session}, country={self.country}"
+            )
+
+    def _generate_new_session_id(self) -> str:
+        base_hash = int(hashlib.md5(self.repo_full_name.encode()).hexdigest(), 16)
+        if not hasattr(self, '_random_offset'):
+            self._random_offset = int(time.time()) % 1000000
+        combined = (base_hash + self.rotation_count + self._random_offset) % 100000000
+        return str(combined).zfill(8)
+
+    def get_proxies(self) -> dict[str, str] | None:
+        """Get current proxy config, rotating IP if request count exceeds threshold."""
+        if not self.enabled:
+            return None
+
+        if self.request_count >= self.max_requests_per_ip:
+            self.rotation_count += 1
+            self.request_count = 0
+            self.current_session_id = None
+            logger.info(f"[{self.repo_full_name}] Rotating to new IP (rotation #{self.rotation_count})")
+
+        if self.current_session_id is None:
+            self.current_session_id = self._generate_new_session_id()
+            logger.info(
+                f"[{self.repo_full_name}] New session ID: {self.current_session_id} "
+                f"(rotation #{self.rotation_count})"
+            )
+
+        if self.use_session:
+            username = f"proxy-cot-{self.country}-sid-{self.current_session_id}"
+        else:
+            username = "proxy"
+
+        http_proxy = f"http://{username}:{self.password}@{self.host}:{self.http_port}"
+        return {
+            "http": http_proxy,
+            "https": http_proxy,
+        }
+
+    def increment_request_count(self):
+        self.request_count += 1
+        if self.request_count % 10 == 0:
+            progress_pct = (self.request_count / self.max_requests_per_ip) * 100
+            logger.info(
+                f"[{self.repo_full_name}] Requests on current IP: "
+                f"{self.request_count}/{self.max_requests_per_ip} ({progress_pct:.0f}%) "
+                f"[Session: {self.current_session_id}]"
+            )
+
+    def update_env_proxies(self):
+        """Update environment variables so urllib (used by GhApi) picks up the proxy."""
+        proxies = self.get_proxies()
+        if proxies:
+            os.environ['HTTP_PROXY'] = proxies['http']
+            os.environ['HTTPS_PROXY'] = proxies['https']
+            os.environ['http_proxy'] = proxies['http']
+            os.environ['https_proxy'] = proxies['https']
+        return proxies
+
 
 class Repo:
     def __init__(self, owner: str, name: str, token: Optional[str] = None,language: Optional[str] = 'python'):
@@ -54,39 +153,103 @@ class Repo:
             name (str): name of target repository
             token (str): github token
         """
-    
+
         self.owner = owner
         self.name = name
         self.token = token
+        self.language = language
+        self.repo_full_name = f"{owner}/{name}"
+
+        # Initialize proxy rotator
+        self.proxy_rotator = ProxyRotator(self.repo_full_name)
+        if self.proxy_rotator.enabled:
+            self.proxy_rotator.update_env_proxies()
+
         self.api = GhApi(token=token)
         self.repo = self.call_api(self.api.repos.get, owner=owner, repo=name)
-        self.language = language
     def github_api(self,url, token, max_retries=5):
+        """HTTP request wrapper with proxy rotation and retry logic."""
         retries = 0
-        headers = {'Authorization': f'token {token}'}
+        headers = {'Authorization': f'token {token}'} if token else {}
 
         while retries < max_retries:
+            # Rotate proxy before each request
+            proxies = None
+            if self.proxy_rotator.enabled:
+                self.proxy_rotator.increment_request_count()
+                proxies = self.proxy_rotator.update_env_proxies()
+
             try:
-                response = requests.get(url, headers=headers)
+                response = requests.get(url, headers=headers, proxies=proxies, timeout=30)
                 if response.status_code == 200:
                     return response
                 elif response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
                     remaining = int(response.headers['X-RateLimit-Remaining'])
                     if remaining == 0:
-                        reset_time = int(response.headers['X-RateLimit-Reset'])
-                        sleep_time = reset_time - int(time.time()) + 1
-                        print(f'Rate limit exceeded. Sleeping for {sleep_time} seconds.')
-                        time.sleep(sleep_time)
-                        retries += 1
+                        if self.proxy_rotator.enabled:
+                            # Force rotate to a new IP instead of sleeping
+                            logger.info(f'[{self.repo_full_name}] Rate limited, rotating proxy IP...')
+                            self.proxy_rotator.rotation_count += 1
+                            self.proxy_rotator.request_count = 0
+                            self.proxy_rotator.current_session_id = None
+                            self.proxy_rotator.update_env_proxies()
+                            retries += 1
+                            time.sleep(1)
+                        else:
+                            reset_time = int(response.headers['X-RateLimit-Reset'])
+                            sleep_time = reset_time - int(time.time()) + 1
+                            print(f'Rate limit exceeded. Sleeping for {sleep_time} seconds.')
+                            time.sleep(sleep_time)
+                            retries += 1
                     else:
                         print(f'url:{url} 403 Forbidden: {response.json()}')
                         return response
+                elif response.status_code == 503 or response.status_code == 502:
+                    # Server error: short backoff + rotate proxy
+                    wait_time = min(3 * (retries + 1), 15)
+                    logger.warning(
+                        f'[{self.repo_full_name}] {response.status_code} error, '
+                        f'retrying in {wait_time}s (attempt {retries+1}/{max_retries})'
+                    )
+                    if self.proxy_rotator.enabled:
+                        self.proxy_rotator.rotation_count += 1
+                        self.proxy_rotator.request_count = 0
+                        self.proxy_rotator.current_session_id = None
+                    time.sleep(wait_time)
+                    retries += 1
+                elif response.status_code == 429:
+                    # Secondary rate limit
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    if self.proxy_rotator.enabled:
+                        logger.info(f'[{self.repo_full_name}] 429 rate limited, rotating proxy...')
+                        self.proxy_rotator.rotation_count += 1
+                        self.proxy_rotator.request_count = 0
+                        self.proxy_rotator.current_session_id = None
+                        self.proxy_rotator.update_env_proxies()
+                        time.sleep(2)
+                    else:
+                        logger.info(f'429 Too Many Requests. Sleeping for {retry_after}s')
+                        time.sleep(retry_after)
+                    retries += 1
                 else:
                     print(f'Error: {response.status_code}, {response.text}')
                     retries += 1
-                    time.sleep(2 ** retries)
+                    time.sleep(min(3 * (retries), 15))
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                    RemoteDisconnected, IncompleteRead, ConnectionResetError, OSError) as e:
+                wait_time = min(3 * (retries + 1), 15)
+                logger.warning(
+                    f'[{self.repo_full_name}] Network error: {e}, '
+                    f'retrying in {wait_time}s (attempt {retries+1}/{max_retries})'
+                )
+                if self.proxy_rotator.enabled:
+                    self.proxy_rotator.rotation_count += 1
+                    self.proxy_rotator.request_count = 0
+                    self.proxy_rotator.current_session_id = None
+                time.sleep(wait_time)
+                retries += 1
             except HTTP404NotFoundError as e:
-                logger.info(f"[{url}] Resource not found ")
+                logger.info(f"[{self.repo_full_name}] Resource not found: {url}")
                 return None
 
         return None
@@ -100,59 +263,86 @@ class Repo:
         if call_type == 'get_prs':
             state = 'closed'
             url = f'https://api.github.com/repos/{owner}/{repo}/pulls?state={state}'
-            # logger.info(f'start collecting pull requests')
         elif call_type == 'get_commits':
             pull_idx = kwargs['pull_idx']
             url = f'https://api.github.com/repos/{owner}/{repo}/pulls/{pull_idx}/commits'
-            # logger.info(f'start collecting commits')
         elif call_type == 'get_comments':
             issue_idx = kwargs['issue_idx']
             url = f'https://api.github.com/repos/{owner}/{repo}/issues/{issue_idx}/comments'
-            # logger.info(f'start collecting comemnts')
-            
+
         while url:
             response = self.github_api(url=url, token=token)
-            if response == None:
+            if response is None:
                 break
             response_data = response.json()
             results_list.extend(response_data)
-            
+
             # check next page for more pull requests
             if 'next' in response.links:
                 url = response.links['next']['url']
             else:
                 url = None
-            
+
         return results_list
 
         
 
     def call_api(self, func: callable, **kwargs) -> dict:
         """
-        API call wrapper with rate limit handling (checks every 5 minutes if rate limit is reset)
-
-        Args:
-            func (callable): API function to call
-            **kwargs: keyword arguments to pass to API function
-        Return:
-            values (dict): response object of `func`
+        API call wrapper with rate limit handling and proxy rotation.
         """
-        while True:
+        # Update proxy env vars before GhApi call (GhApi uses urllib which reads env vars)
+        if self.proxy_rotator.enabled:
+            self.proxy_rotator.increment_request_count()
+            self.proxy_rotator.update_env_proxies()
+
+        max_retries = 5
+        for attempt in range(max_retries):
             try:
                 values = func(**kwargs)
                 return values
             except HTTP403ForbiddenError as e:
-                while True:
-                    rl = self.api.rate_limit.get()
-                    logger.info(
-                        f"[{self.owner}/{self.name}] Rate limit exceeded, waiting for 5 minutes, remaining: {rl.resources.core.remaining}"
+                if self.proxy_rotator.enabled:
+                    # Rotate IP instead of waiting for rate limit reset
+                    logger.warning(
+                        f"[{self.repo_full_name}] 403 Forbidden, rotating proxy IP "
+                        f"(attempt {attempt+1}/{max_retries})..."
                     )
-                    if rl.resources.core.remaining > 0:
-                        break
-                    time.sleep(60 * 5)
+                    self.proxy_rotator.rotation_count += 1
+                    self.proxy_rotator.request_count = 0
+                    self.proxy_rotator.current_session_id = None
+                    self.proxy_rotator.update_env_proxies()
+                    time.sleep(2)
+                else:
+                    while True:
+                        rl = self.api.rate_limit.get()
+                        logger.info(
+                            f"[{self.repo_full_name}] Rate limit exceeded, waiting 5 min, "
+                            f"remaining: {rl.resources.core.remaining}"
+                        )
+                        if rl.resources.core.remaining > 0:
+                            break
+                        time.sleep(60 * 5)
             except HTTP404NotFoundError as e:
-                logger.info(f"[{self.owner}/{self.name}] Resource not found {kwargs}")
+                logger.info(f"[{self.repo_full_name}] Resource not found {kwargs}")
                 return None
+            except (RemoteDisconnected, IncompleteRead, ConnectionError,
+                    ConnectionResetError, TimeoutError, OSError) as e:
+                wait_time = 3 * (attempt + 1)
+                logger.warning(
+                    f"[{self.repo_full_name}] Network error (attempt {attempt+1}/{max_retries}): {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                if self.proxy_rotator.enabled:
+                    self.proxy_rotator.rotation_count += 1
+                    self.proxy_rotator.request_count = 0
+                    self.proxy_rotator.current_session_id = None
+                    self.proxy_rotator.update_env_proxies()
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"[{self.repo_full_name}] Max retries reached: {e}")
+                    return None
 
     def extract_resolved_issues_with_official_github_api(self, pull: dict) -> list[str]:
         """
@@ -236,7 +426,7 @@ class Repo:
     ) -> list:
         """
         Return all values from a paginated API endpoint.
-        
+
         Args:
             func (callable): API function to call
             per_page (int): number of values to return per page
@@ -245,6 +435,8 @@ class Repo:
             **kwargs: keyword arguments to pass to API function
         """
         page = 1
+        retry_count = 0
+        max_retries = 3
         args = {
             "owner": self.owner,
             "repo": self.name,
@@ -253,33 +445,68 @@ class Repo:
         }
         while True:
             try:
+                # Update proxy before each paginated call
+                if self.proxy_rotator.enabled:
+                    self.proxy_rotator.increment_request_count()
+                    self.proxy_rotator.update_env_proxies()
+
                 # Get values from API call
                 values = func(**args, page=page)
                 yield from values
+                retry_count = 0
                 if len(values) == 0:
                     break
                 if not quiet:
                     rl = self.api.rate_limit.get()
                     logger.info(
-                        f"[{self.owner}/{self.name}] Processed page {page} ({per_page} values per page). Remaining calls: {rl.resources.core.remaining}"
+                        f"[{self.repo_full_name}] Processed page {page} ({per_page} values per page). Remaining calls: {rl.resources.core.remaining}"
                     )
                 if num_pages is not None and page >= num_pages:
                     break
                 page += 1
-            except Exception as e:
-                # Rate limit handling
-                logger.error(f"Error processing page {page}: {e}")
-                while True:
-                    rl = self.api.rate_limit.get()
-                    if rl.resources.core.remaining > 0:
-                        break
-                    logger.info(
-                        f"[{self.owner}/{self.name}] Waiting for rate limit reset, checking again in 5 minutes"
+            except (IncompleteRead, RemoteDisconnected, ConnectionResetError, OSError) as e:
+                retry_count += 1
+                if retry_count <= max_retries:
+                    logger.warning(
+                        f"[{self.repo_full_name}] Network error on page {page} "
+                        f"(attempt {retry_count}/{max_retries}): {e}, retrying..."
                     )
-                    time.sleep(60 * 5)
+                    if self.proxy_rotator.enabled:
+                        self.proxy_rotator.rotation_count += 1
+                        self.proxy_rotator.request_count = 0
+                        self.proxy_rotator.current_session_id = None
+                        self.proxy_rotator.update_env_proxies()
+                    time.sleep(3 * retry_count)
+                else:
+                    logger.error(f"[{self.repo_full_name}] Max retries on page {page}, skipping")
+                    page += 1
+                    retry_count = 0
+            except Exception as e:
+                error_str = str(e)
+                logger.error(f"[{self.repo_full_name}] Error processing page {page}: {e}")
+                if "404" in error_str or "Not Found" in error_str:
+                    page += 1
+                    continue
+                if self.proxy_rotator.enabled:
+                    # Rotate IP and retry
+                    self.proxy_rotator.rotation_count += 1
+                    self.proxy_rotator.request_count = 0
+                    self.proxy_rotator.current_session_id = None
+                    self.proxy_rotator.update_env_proxies()
+                    time.sleep(3)
+                else:
+                    # Original rate limit handling
+                    while True:
+                        rl = self.api.rate_limit.get()
+                        if rl.resources.core.remaining > 0:
+                            break
+                        logger.info(
+                            f"[{self.repo_full_name}] Waiting for rate limit reset, checking again in 5 minutes"
+                        )
+                        time.sleep(60 * 5)
         if not quiet:
             logger.info(
-                f"[{self.owner}/{self.name}] Processed {(page-1)*per_page + len(values)} values"
+                f"[{self.repo_full_name}] Processed {(page-1)*per_page + len(values)} values"
             )
 
     def get_all_issues(
@@ -552,12 +779,13 @@ def get_with_retries(
     token: str = None,
     max_retries: int = 5,
     backoff_factor: float = 0.5,
-    timeout: int = 5
+    timeout: int = 15,
+    proxy_rotator: ProxyRotator = None,
 ) -> str:
     if token and not check_token_validity(token):
         logger.warning("Invalid GitHub token, aborting request.")
         return ""
-    
+
     session = requests.Session()
     headers = {"Authorization": f"token {token}"} if token else {}
 
@@ -572,8 +800,14 @@ def get_with_retries(
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
+    # Get proxy config
+    proxies = None
+    if proxy_rotator and proxy_rotator.enabled:
+        proxy_rotator.increment_request_count()
+        proxies = proxy_rotator.get_proxies()
+
     try:
-        response = session.get(url, headers=headers, timeout=timeout)
+        response = session.get(url, headers=headers, timeout=timeout, proxies=proxies)
         response.raise_for_status()
         return response.text
     except Exception as e:
@@ -593,7 +827,7 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
     """
     # Convert diff to patch format with "index" lines removed
     # patch = requests.get(pull["diff_url"]).text
-    patch = get_with_retries(pull["diff_url"],repo.token)
+    patch = get_with_retries(pull["diff_url"], repo.token, proxy_rotator=repo.proxy_rotator)
     if patch =='':
         return "", "", False
     if patch.endswith("\n"):

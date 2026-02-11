@@ -199,13 +199,20 @@ def set_model(model_name: str):
         real_model_name = model_name.removeprefix("litellm-generic-")
         prompt_tokens = 5
         completion_tokens = 10
-        prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar = (
-            cost_per_token(
-                model=real_model_name,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+        try:
+            prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar = (
+                cost_per_token(
+                    model=real_model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
             )
-        )
+        except Exception as e:
+            # If model pricing is not found, use default pricing (similar to GPT-3.5)
+            log_and_print(f"Warning: Could not fetch pricing for model {real_model_name}: {e}")
+            log_and_print(f"Using default pricing: $0.0015 per 1K input tokens, $0.002 per 1K output tokens")
+            prompt_tokens_cost_usd_dollar = 0.0015 / 1000  # $0.0015 per 1K tokens
+            completion_tokens_cost_usd_dollar = 0.002 / 1000  # $0.002 per 1K tokens
         # litellm.set_verbose = True
         SELECTED_MODEL = LiteLLMGeneric(
             real_model_name,
