@@ -216,7 +216,7 @@ async def main(
     cutoff_date = datetime.strptime(cutoff_date, "%Y-%m-%dT%H:%M:%SZ")
 
     if token is None:
-        token = os.environ["GITHUB_TOKEN"]
+        token = os.environ.get("GITHUB_TOKEN", "") or None
 
     repos = dict()
     stats = {'completed': 0, 'with_tests': 0, 'valid_pulls': 0, 'total_processed': 0}
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     parser.add_argument("output", type=str, help="Output file name")
     parser.add_argument("--token", type=str, help="GitHub token")
     parser.add_argument("--mode", type=str, default='omnigirl', help="collecting mode")
-    parser.add_argument("--cutoff_date", type=str, default="2025-03-31T23:59:59Z", help="Cutoff date for filtering PRs in YYYY-MM-DDTHH:MM:SSZ format")
+    parser.add_argument("--cutoff_date", type=str, default="2026-01-31T23:59:59Z", help="Cutoff date for filtering PRs in YYYY-MM-DDTHH:MM:SSZ format")
     parser.add_argument("--language", type=str, help="language")
     parser.add_argument("--max_concurrency", type=int, default=20, help="Maximum number of concurrent tasks")
 

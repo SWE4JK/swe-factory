@@ -173,3 +173,4 @@ run_collect*/
 run_collect_train
 scripts/*.json
 scripts/dataset/
+run_instances/

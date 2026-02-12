@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import random
@@ -167,6 +168,11 @@ class Repo:
 
         self.api = GhApi(token=token)
         self.repo = self.call_api(self.api.repos.get, owner=owner, repo=name)
+        if self.repo is None:
+            raise RuntimeError(
+                f"Failed to access repository {self.repo_full_name} after multiple retries. "
+                f"Check network connectivity, proxy settings, and API rate limits."
+            )
     def github_api(self,url, token, max_retries=5):
         """HTTP request wrapper with proxy rotation and retry logic."""
         retries = 0
@@ -343,6 +349,17 @@ class Repo:
                 else:
                     logger.error(f"[{self.repo_full_name}] Max retries reached: {e}")
                     return None
+            except Exception as e:
+                wait_time = 3 * (attempt + 1)
+                logger.error(
+                    f"[{self.repo_full_name}] Unexpected error (attempt {attempt+1}/{max_retries}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"[{self.repo_full_name}] Max retries reached for unexpected error: {e}")
+                    return None
+        return None
 
     def extract_resolved_issues_with_official_github_api(self, pull: dict) -> list[str]:
         """
@@ -540,17 +557,169 @@ class Repo:
         )
         return issues
 
-    def get_all_pulls_with_official_github_api(self
-    )-> list:
-        kwargs = {
-            'call_type' : 'get_prs',
-            'owner' : self.owner,
-            'repo' : self.name,
-            'token' : self.token,
+    def get_all_pulls_with_official_github_api(self, max_workers: int = 8, cache_dir: str = None) -> list:
+        """
+        Fetch all closed PRs with parallel pagination, page-level caching, and resume support.
 
+        1. Fetch page 1 to discover total pages from Link header (or read from cache)
+        2. Check cache for already-fetched pages (supports resume after crash)
+        3. Fetch remaining pages concurrently, each thread with its own proxy IP
+        4. Combine all pages and return results
+
+        Args:
+            max_workers: number of concurrent threads for parallel fetching
+            cache_dir: directory for page-level cache files (enables resume). If None, no caching.
+        """
+        base_url = f'https://api.github.com/repos/{self.owner}/{self.name}/pulls?state=closed&per_page=100'
+        headers = {'Authorization': f'token {self.token}'} if self.token else {}
+
+        # Setup page-level cache for resume support
+        page_cache_dir = None
+        meta_path = None
+        if cache_dir:
+            page_cache_dir = os.path.join(cache_dir, f'.prcache_{self.owner}_{self.name}')
+            os.makedirs(page_cache_dir, exist_ok=True)
+            meta_path = os.path.join(page_cache_dir, 'meta.json')
+
+        # Step 1: Determine total pages (from cache or fetch page 1)
+        last_page = None
+        page1_data = []
+        if meta_path and os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    last_page = json.load(f)['total_pages']
+                logger.info(f"[{self.repo_full_name}] Resuming: {last_page} pages (from cache)")
+            except Exception:
+                pass
+
+        if last_page is None:
+            proxies = None
+            if self.proxy_rotator.enabled:
+                self.proxy_rotator.increment_request_count()
+                proxies = self.proxy_rotator.update_env_proxies()
+
+            try:
+                resp = requests.get(f'{base_url}&page=1', headers=headers, proxies=proxies, timeout=30)
+            except Exception as e:
+                logger.warning(f"[{self.repo_full_name}] Failed to fetch page 1: {e}")
+                return self._get_all_pulls_sequential()
+
+            if resp.status_code != 200:
+                logger.warning(f"[{self.repo_full_name}] Page 1 returned HTTP {resp.status_code}")
+                return self._get_all_pulls_sequential()
+
+            page1_data = resp.json()
+            last_page = 1
+            import re as _re
+            match = _re.search(r'page=(\d+)>; rel="last"', resp.headers.get('Link', ''))
+            if match:
+                last_page = int(match.group(1))
+
+            # Save page 1 and metadata to cache
+            if page_cache_dir:
+                with open(os.path.join(page_cache_dir, 'page_0001.json'), 'w') as f:
+                    json.dump(page1_data, f)
+                with open(meta_path, 'w') as f:
+                    json.dump({'total_pages': last_page}, f)
+
+            if last_page <= 1:
+                logger.info(f"[{self.repo_full_name}] Only 1 page ({len(page1_data)} PRs)")
+                return page1_data
+
+        # Step 2: Find already-cached pages
+        cached_pages = set()
+        if page_cache_dir:
+            for fname in os.listdir(page_cache_dir):
+                if fname.startswith('page_') and fname.endswith('.json'):
+                    try:
+                        cached_pages.add(int(fname[5:-5]))
+                    except ValueError:
+                        pass
+
+        pages_to_fetch = [p for p in range(1, last_page + 1) if p not in cached_pages]
+        logger.info(
+            f"[{self.repo_full_name}] {last_page} pages total, "
+            f"{len(cached_pages)} cached, {len(pages_to_fetch)} to fetch"
+        )
+
+        # Step 3: Fetch missing pages in parallel
+        fetched_data = {}
+        if pages_to_fetch:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def fetch_page(page_num):
+                """Fetch a single page with its own proxy session."""
+                page_proxies = None
+                if self.proxy_rotator.enabled:
+                    sid = str((int(self.proxy_rotator.current_session_id or '0') + page_num * 7) % 100000000).zfill(8)
+                    username = f"proxy-cot-{self.proxy_rotator.country}-sid-{sid}"
+                    http_proxy = f"http://{username}:{self.proxy_rotator.password}@{self.proxy_rotator.host}:{self.proxy_rotator.http_port}"
+                    page_proxies = {"http": http_proxy, "https": http_proxy}
+
+                url = f'{base_url}&page={page_num}'
+                for attempt in range(3):
+                    try:
+                        r = requests.get(url, headers=headers, proxies=page_proxies, timeout=30)
+                        if r.status_code == 200:
+                            data = r.json()
+                            if page_cache_dir:
+                                with open(os.path.join(page_cache_dir, f'page_{page_num:04d}.json'), 'w') as f:
+                                    json.dump(data, f)
+                            return data
+                        elif r.status_code in (403, 429) and self.proxy_rotator.enabled:
+                            sid = str(random.randint(10000000, 99999999))
+                            username = f"proxy-cot-{self.proxy_rotator.country}-sid-{sid}"
+                            http_proxy = f"http://{username}:{self.proxy_rotator.password}@{self.proxy_rotator.host}:{self.proxy_rotator.http_port}"
+                            page_proxies = {"http": http_proxy, "https": http_proxy}
+                            time.sleep(2)
+                        else:
+                            logger.warning(f"[{self.repo_full_name}] Page {page_num}: HTTP {r.status_code}")
+                            time.sleep(2)
+                    except Exception as e:
+                        logger.warning(f"[{self.repo_full_name}] Page {page_num} attempt {attempt+1}: {e}")
+                        time.sleep(2)
+                return []
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_page, p): p for p in pages_to_fetch}
+                for future in as_completed(futures):
+                    page_num = futures[future]
+                    try:
+                        data = future.result()
+                        if not page_cache_dir:
+                            fetched_data[page_num] = data
+                    except Exception as e:
+                        logger.error(f"[{self.repo_full_name}] Page {page_num} failed: {e}")
+
+        # Step 4: Combine all results
+        results = []
+        for page_num in range(1, last_page + 1):
+            if page_cache_dir:
+                cache_file = os.path.join(page_cache_dir, f'page_{page_num:04d}.json')
+                if os.path.exists(cache_file):
+                    try:
+                        with open(cache_file) as f:
+                            results.extend(json.load(f))
+                    except Exception as e:
+                        logger.warning(f"[{self.repo_full_name}] Bad cache page {page_num}: {e}")
+            else:
+                if page_num == 1:
+                    results.extend(page1_data)
+                elif page_num in fetched_data:
+                    results.extend(fetched_data[page_num])
+
+        logger.info(f"[{self.repo_full_name}] Fetched {len(results)} PRs total from {last_page} pages")
+        return results
+
+    def _get_all_pulls_sequential(self) -> list:
+        """Fallback: sequential pagination (original implementation)."""
+        kwargs = {
+            'call_type': 'get_prs',
+            'owner': self.owner,
+            'repo': self.name,
+            'token': self.token,
         }
-        pulls = self.call_github_api( **kwargs)
-        return pulls
+        return self.call_github_api(**kwargs)
       
     def get_all_pulls(
         self,

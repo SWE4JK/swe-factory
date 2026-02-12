@@ -145,6 +145,7 @@ class LiteLLMGeneric(Model):
                 ),
                 top_p=top_p,
                 stream=False,
+                base_url=os.getenv("OPENAI_API_BASE_URL") or os.getenv("OPENAI_API_BASE"),
             )
             assert isinstance(response, ModelResponse)
             resp_usage = response.usage

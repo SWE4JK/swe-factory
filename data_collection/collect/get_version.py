@@ -28,13 +28,18 @@ def get_version_by_git(cloned_dir: str) -> str:
     if not os.path.isdir(cloned_dir):
         raise NotADirectoryError(f"Invalid directory: {cloned_dir}")
     with cd(cloned_dir):
-        result = run_command(["git", "describe", "--tags"], capture_output=True, text=True)
-        version = result.stdout.strip()
+        try:
+            result = run_command(["git", "describe", "--tags"], capture_output=True, text=True)
+            version = result.stdout.strip()
+        except subprocess.CalledProcessError:
+            print(f"⚠️ No tags reachable from this commit, version set to 'unknown'")
+            return "unknown"
         print(f"✔️ Current version: {version}")
         match = re.search(r"(\d+\.\d+)(?:\.\d+)?", version)
         if match:
             return match.group(1)
-        raise RuntimeError(f"Unrecognized version: {version}")
+        print(f"⚠️ Unrecognized version format: {version}, version set to 'unknown'")
+        return "unknown"
 
 def get_instances(instance_path: str) -> List[Dict]:
     if instance_path.endswith((".jsonl", ".jsonl.all")):

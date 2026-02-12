@@ -4,11 +4,12 @@ import argparse
 import os
 import sys
 
-def fetch_top_repos(language: str, output_path: str, top_n: int, token: str):
+def fetch_top_repos(language: str, output_path: str, top_n: int, token: str = None):
     headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"token {token}"
     }
+    if token:
+        headers["Authorization"] = f"token {token}"
 
     url = "https://api.github.com/search/repositories"
     params = {
@@ -59,10 +60,9 @@ def main():
     parser.add_argument("--top_n", type=int, default=500, help="Number of top repositories to fetch")
     args = parser.parse_args()
 
-    token = os.environ.get("GITHUB_TOKEN")
+    token = os.environ.get("GITHUB_TOKEN") or None
     if not token:
-        print("❌ GitHub token not found. Please set the environment variable `github_token`.")
-        sys.exit(1)
+        print("⚠️  No GITHUB_TOKEN set, using anonymous mode (rate limit: 10 req/min)")
 
     fetch_top_repos(
         language=args.language,

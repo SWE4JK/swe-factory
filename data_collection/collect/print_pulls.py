@@ -96,7 +96,8 @@ def log_all_pulls(repo: Repo, output: str, mode: str, pr_data_list=None,
         return
 
     # --- omnigirl mode with concurrency ---
-    pulls = repo.get_all_pulls_with_official_github_api()
+    cache_dir = os.path.dirname(output) or "."
+    pulls = repo.get_all_pulls_with_official_github_api(max_workers=workers, cache_dir=cache_dir)
     print(f'total prs number: {len(pulls)}')
 
     # Filter already processed PRs
@@ -142,14 +143,18 @@ def main(repo_name: str, output: str, token: Optional[str] = None,
     Logic for logging all pull requests in a repository.
     """
     if token is None:
-        token = os.environ.get("GITHUB_TOKEN", "")
+        token = os.environ.get("GITHUB_TOKEN", "") or None
     try:
         owner, repo = repo_name.split("/")
     except Exception:
         print(repo_name)
         return
     logger.info(repo_name)
-    repo_obj = Repo(owner, repo, token=token)
+    try:
+        repo_obj = Repo(owner, repo, token=token)
+    except RuntimeError as e:
+        logger.error(f"Failed to initialize repository {repo_name}: {e}")
+        raise SystemExit(1)
 
     pr_data_list = None
     if os.path.exists(output):

@@ -225,7 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("output", type=str, help="Output file name")
     parser.add_argument("--token", type=str, help="GitHub token")
     parser.add_argument("--mode", type=str, default='omnigirl',help="collecting mode")
-    parser.add_argument("--cutoff_date", type=str, default="2025-03-31T23:59:59Z", help="Cutoff date for filtering PRs in YYYY-MM-DDTHH:MM:SSZ format")
+    parser.add_argument("--cutoff_date", type=str, default="2026-01-31T23:59:59Z", help="Cutoff date for filtering PRs in YYYY-MM-DDTHH:MM:SSZ format")
     parser.add_argument("--language", type=str, help="language")
     
     args = parser.parse_args()
