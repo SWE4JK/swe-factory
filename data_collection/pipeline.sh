@@ -20,7 +20,7 @@ set -euo pipefail
 # ============================================================
 # get_top_repos.py 使用 token (搜索 API 限额更高)
 # print_pulls / build_dataset / get_version 不使用 token (走 proxy 轮转)
-GITHUB_TOKEN_FOR_SEARCH="${GITHUB_TOKEN:-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}"
+GITHUB_TOKEN_FOR_SEARCH="${GITHUB_TOKEN:-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}"
 
 export VORTEX_PROXY_HOST="${VORTEX_PROXY_HOST:-vortex-3v43ceqya3nk8fejice5r2la.vortexip.ap-southeast-1.volces.com}"
 export VORTEX_PROXY_PASSWORD="${VORTEX_PROXY_PASSWORD:-Hq0aAZSPDJx1}"
@@ -35,8 +35,9 @@ export VORTEX_PROXY_MAX_REQUESTS_PER_IP="${VORTEX_PROXY_MAX_REQUESTS_PER_IP:-50}
 # ============================================================
 LANGUAGE="Python"             # 目标编程语言，用于 GitHub 搜索和数据目录分类 (e.g. Python, Java, Go)
 TOP_N=100                     # 从 GitHub 获取该语言 star 数最多的前 N 个仓库
-SKIP_FETCH_REPOS=true        # 是否跳过 get_top_repos.py 步骤，为 true 时直接使用已有的仓库列表 JSON
+SKIP_FETCH_REPOS=false        # 是否跳过 get_top_repos.py 步骤，为 true 时直接使用已有的仓库列表 JSON
 REPOS=""                      # 手动指定仓库列表 (逗号分隔，如 "owner1/repo1,owner2/repo2")，非空时忽略 top_n 列表
+RETRY_FAILED=false            # 是否只重试之前失败的仓库 (从 summary 文件读取)
 PR_WORKERS=32                 # print_pulls.py 并发线程数，控制抓取 PR 的速度
 ASYNC_CONCURRENCY=20          # build_dataset_async.py 异步并发数，控制构建 instance 的并行度
 VERSION_WORKERS=20            # get_version.py 并行进程数，控制 git clone + 版本提取的并行度
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --top_n)          TOP_N="$2";             shift 2 ;;
         --skip-fetch-repos) SKIP_FETCH_REPOS=true; shift ;;
         --repos)          REPOS="$2";             shift 2 ;;
+        --retry-failed)   RETRY_FAILED=true;      shift ;;
         --pr-workers)     PR_WORKERS="$2";        shift 2 ;;
         --async-concurrency) ASYNC_CONCURRENCY="$2"; shift 2 ;;
         --version-workers) VERSION_WORKERS="$2";  shift 2 ;;
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --top_n N                Number of top repos to fetch (default: 100)"
             echo "  --skip-fetch-repos       Skip fetching repos, use existing repos JSON"
             echo "  --repos REPOS            Comma-separated repos to process (e.g. 'owner/repo1,owner/repo2')"
+            echo "  --retry-failed           Only retry repos that failed in previous runs"
             echo "  --pr-workers N           Workers for print_pulls.py (default: 32)"
             echo "  --async-concurrency N    Concurrency for build_dataset_async.py (default: 20)"
             echo "  --version-workers N      Workers for get_version.py (default: 20)"
@@ -148,6 +151,7 @@ echo -e "${BOLD}========================================${RESET}"
 echo -e "  Language:    ${CYAN}$LANGUAGE${RESET}"
 echo -e "  Top N:       $TOP_N"
 echo -e "  Data root:   $COLLECT_DIR/$DATA_ROOT"
+echo -e "  Retry mode:  $([ "$RETRY_FAILED" = true ] && echo -e "${YELLOW}ON${RESET}" || echo "OFF")"
 echo -e "  Start from:  $START_FROM"
 echo -e "  End at:      $END_AT"
 echo -e "${BOLD}========================================${RESET}"
@@ -227,6 +231,60 @@ TOTAL_REPOS=${#REPO_LIST[@]}
 # 后续步骤不使用 token，走 anonymous + proxy 轮转
 export GITHUB_TOKEN=""
 
+# ============================================================
+# Apply --retry-failed filter if specified
+# ============================================================
+if [ "$RETRY_FAILED" = true ]; then
+    SUMMARY_FILE="$DATA_ROOT/${LANG_LOWER}_pipeline_summary.jsonl"
+
+    if [ ! -f "$SUMMARY_FILE" ]; then
+        echo -e "${RED}Error: --retry-failed specified but summary file not found: $SUMMARY_FILE${RESET}"
+        echo "Run the pipeline without --retry-failed first to generate the summary."
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${YELLOW}[Retry Mode]${RESET} Loading failed repos from $SUMMARY_FILE ..."
+
+    # Build a map of failed repos with their failure info
+    declare -A FAILED_REPOS_MAP
+    declare -A FAILED_STEP_MAP
+
+    while IFS= read -r line; do
+        REPO=$(echo "$line" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('repo', ''))")
+        STATUS=$(echo "$line" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('status', ''))")
+        FAILED_STEP=$(echo "$line" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('step', '0'))")
+
+        if [ "$STATUS" = "failed" ] && [ -n "$REPO" ]; then
+            FAILED_REPOS_MAP["$REPO"]=1
+            FAILED_STEP_MAP["$REPO"]=$FAILED_STEP
+        fi
+    done < "$SUMMARY_FILE"
+
+    FAILED_COUNT=${#FAILED_REPOS_MAP[@]}
+
+    if [ "$FAILED_COUNT" -eq 0 ]; then
+        echo -e "${GREEN}No failed repos found in summary. Nothing to retry.${RESET}"
+        exit 0
+    fi
+
+    echo -e "  Found ${RED}${FAILED_COUNT}${RESET} failed repos"
+
+    # Filter REPO_LIST to only include failed repos
+    FILTERED_REPO_LIST=()
+    for repo in "${REPO_LIST[@]}"; do
+        if [ "${FAILED_REPOS_MAP[$repo]:-}" = "1" ]; then
+            FILTERED_REPO_LIST+=("$repo")
+        fi
+    done
+
+    REPO_LIST=("${FILTERED_REPO_LIST[@]}")
+    TOTAL_REPOS=${#REPO_LIST[@]}
+
+    echo -e "  Will retry ${BOLD}${TOTAL_REPOS}${RESET} repos"
+    echo ""
+fi
+
 # Apply start-from / end-at slicing
 if [ "$END_AT" -eq -1 ]; then
     END_AT=$TOTAL_REPOS
@@ -283,9 +341,46 @@ for (( idx=START_FROM; idx<END_AT; idx++ )); do
     PR_COUNT=0
     INSTANCE_COUNT=0
     VERSION_COUNT=0
+    FAILED_AT_STEP=0
+
+    # Check if this repo failed before (in retry mode)
+    if [ "$RETRY_FAILED" = true ] && [ -n "${FAILED_STEP_MAP[$REPO_FULL]:-}" ]; then
+        FAILED_AT_STEP=${FAILED_STEP_MAP[$REPO_FULL]}
+        echo -e "  ${YELLOW}Retry mode:${RESET} Previous failure at step ${FAILED_AT_STEP}"
+
+        # Clean up the output file of the failed step to force re-run
+        case "$FAILED_AT_STEP" in
+            1)
+                # Step 1 failed: remove prs.jsonl if it exists and seems incomplete
+                if [ -f "$PRS_FILE" ]; then
+                    PR_COUNT=$(wc -l < "$PRS_FILE" 2>/dev/null || echo "0")
+                    if [ "$PR_COUNT" -eq 0 ]; then
+                        echo -e "  ${DIM}Removing empty $PRS_FILE${RESET}"
+                        rm -f "$PRS_FILE"
+                    else
+                        echo -e "  ${DIM}Keeping existing $PRS_FILE ($PR_COUNT PRs)${RESET}"
+                    fi
+                fi
+                ;;
+            2)
+                # Step 2 failed: remove instances.jsonl to force rebuild
+                if [ -f "$INSTANCES_FILE" ]; then
+                    echo -e "  ${DIM}Removing $INSTANCES_FILE from previous failed run${RESET}"
+                    rm -f "$INSTANCES_FILE"
+                fi
+                ;;
+            3)
+                # Step 3 failed: remove instances_versions.jsonl to force re-version
+                if [ -f "$VERSIONS_FILE" ]; then
+                    echo -e "  ${DIM}Removing $VERSIONS_FILE from previous failed run${RESET}"
+                    rm -f "$VERSIONS_FILE"
+                fi
+                ;;
+        esac
+    fi
 
     # ----------------------------------------------------------
-    # Skip if final output already exists
+    # Skip if final output already exists (unless retrying)
     # ----------------------------------------------------------
     if [ -f "$VERSIONS_FILE" ]; then
         VERSION_COUNT=$(wc -l < "$VERSIONS_FILE")
